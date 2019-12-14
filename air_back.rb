@@ -20,9 +20,16 @@ class AirBack < Sinatra::Base
 
   get "/air_quality_data" do
     content_type "application/json"
+    key = "airquality"
 
-    if (cached = redis.get("airquality"))
+    if (cached = redis.get(key))
       logger.info "Found cached air quality data"
+
+      remaining = redis.ttl(key)
+      if remaining > 0
+        expires remaining, :public, :must_revalidate
+      end
+
       cached
     else
       logger.info "Fetching new air quality data"
@@ -30,6 +37,7 @@ class AirBack < Sinatra::Base
       json = data.to_json
       ttl = data["error"] ? 30 : 60
       redis.setex("airquality", ttl, json)
+      expires ttl, :public, :must_revalidate
       json
     end
   end
@@ -39,9 +47,16 @@ class AirBack < Sinatra::Base
 
     if (device_id = params[:device_id])
       hash = Digest::SHA1.hexdigest(device_id.to_s.downcase)
+      key = "measurements_#{hash}"
 
-      if (cached = redis.get("measurements_#{hash}"))
+      if (cached = redis.get(key))
         logger.info "Found cached measurements for #{device_id}"
+
+        remaining = redis.ttl(key)
+        if remaining > 0
+          expires remaining, :public, :must_revalidate
+        end
+
         cached
       else
         logger.info "Fetching new measurements for #{device_id}"
@@ -49,6 +64,7 @@ class AirBack < Sinatra::Base
         json = data.to_json
         ttl = data["error"] ? 30 : 60
         redis.setex("measurements_#{hash}", ttl, json)
+        expires ttl, :public, :must_revalidate
         json
       end
     else
