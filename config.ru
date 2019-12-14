@@ -13,6 +13,8 @@ use Rack::Cors do
   end
 end
 
+use Rack::Deflater
+
 require "dotenv/load"
 require "./air_back"
 
