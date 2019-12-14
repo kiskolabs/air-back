@@ -172,7 +172,7 @@ class AirBack < Sinatra::Base
   end
 
   def redis
-    @redis ||= if ENV["REDIS_URL"]
+    Thread.current[:air_back_redis] ||= if ENV["REDIS_URL"]
       Redis.new(url: ENV["REDIS_URL"])
     else
       Redis.new
