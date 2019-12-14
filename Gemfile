@@ -12,6 +12,7 @@ gem "honeybadger", require: false
 gem "pry"
 gem "puma"
 gem "rack-cors"
+gem "rack-rewrite", require: "rack/rewrite"
 gem "rake"
 gem "redis"
 gem "sinatra-contrib"
