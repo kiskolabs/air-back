@@ -45,7 +45,7 @@ class AirBack < Sinatra::Base
         cached
       else
         logger.info "Fetching new measurements for #{device_id}"
-        data = get_airquality_data
+        data = get_measurements(device_id: params[:device_id])
         json = data.to_json
         ttl = data["error"] ? 30 : 60
         redis.setex("measurements_#{hash}", ttl, json)
@@ -84,8 +84,8 @@ class AirBack < Sinatra::Base
       date_end: now.to_i,
       device_id: device_id,
       limit: 1024,
-      optimize: "false",
-      real_time: "false",
+      optimize: false,
+      real_time: false,
       scale: "max",
       type: "CO2,Humidity,Noise,Temperature"
     })
