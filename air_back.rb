@@ -5,6 +5,8 @@ require "sinatra/reloader"
 require "honeybadger"
 
 class AirBack < Sinatra::Base
+  MEASUREMENT_FIELDS = "CO2,Humidity,Noise,Temperature".freeze
+
   configure :development do
     register Sinatra::Reloader
   end
@@ -48,6 +50,8 @@ class AirBack < Sinatra::Base
     if (device_id = params[:device_id])
       hash = Digest::SHA1.hexdigest(device_id.to_s.downcase)
       key = "measurements_#{hash}"
+
+      response["Measurement-Fields"] = MEASUREMENT_FIELDS
 
       if (cached = redis.get(key))
         logger.info "Found cached measurements for #{device_id}"
@@ -103,10 +107,12 @@ class AirBack < Sinatra::Base
       optimize: false,
       real_time: false,
       scale: "max",
-      type: "CO2,Humidity,Noise,Temperature"
+      type: MEASUREMENT_FIELDS
     })
 
     parsed = response.parse
+
+    pp parsed
 
     if parsed["body"]
       body = parsed["body"]
