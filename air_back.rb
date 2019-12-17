@@ -13,6 +13,7 @@ class AirBack < Sinatra::Base
 
   configure :production, :development do
     enable :logging
+    set :protection, except: [:json_csrf]
   end
 
   get "/" do
