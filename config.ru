@@ -3,6 +3,10 @@ require "bundler"
 
 Bundler.require
 
+require "dotenv"
+
+Dotenv.load(".env.local", ".env")
+
 if ENV["FORCE_SSL"] == "true"
   use Rack::Rewrite do
     r301 %r{(.*)}, lambda { |match, rack_env|
@@ -23,7 +27,7 @@ end
 
 use Rack::Deflater
 
-require "dotenv/load"
+
 require "./air_back"
 
 run AirBack
