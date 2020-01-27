@@ -91,8 +91,12 @@ class AirBack < Sinatra::Base
 
     if parsed["body"]
       body = parsed["body"]
-      body.delete("user")
-      body
+      if body.length > 0
+        body.delete("user")
+        body
+      else
+        { "error" => "No data received" }
+      end
     elsif (message = parsed.dig("error", "message"))
       { "error" => message }
     else
@@ -124,8 +128,11 @@ class AirBack < Sinatra::Base
 
     if parsed["body"]
       body = parsed["body"]
-      # body.delete("user")
-      body
+      if body.length > 0
+        body
+      else
+        { "error" => "No data received" }
+      end
     elsif (message = parsed.dig("error", "message"))
       return { "error" => message }
     else
