@@ -37,6 +37,7 @@ class AirBack < Sinatra::Base
     else
       logger.info "Fetching new air quality data"
       data = get_airquality_data
+      Honeybadger.context(data: data)
       json = data.to_json
       ttl = data["error"] ? 30 : 60
       redis.setex("airquality", ttl, json)
@@ -66,6 +67,7 @@ class AirBack < Sinatra::Base
       else
         logger.info "Fetching new measurements for #{device_id}"
         data = get_measurements(device_id: params[:device_id])
+        Honeybadger.context(data: data)
         json = data.to_json
         ttl = data["error"] ? 30 : 60
         redis.setex("measurements_#{hash}", ttl, json)
