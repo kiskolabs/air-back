@@ -1,7 +1,9 @@
+# frozen_string_literal: true
+
 require "rubygems"
 require "bundler"
 
-Bundler.require
+Bundler.require(:default)
 
 require "dotenv"
 
@@ -26,7 +28,6 @@ use Rack::Cors do
 end
 
 use Rack::Deflater
-
 
 require "./air_back"
 

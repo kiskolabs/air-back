@@ -1,0 +1,86 @@
+#!/usr/bin/env ruby
+
+puts "Preparing attachments..."
+
+## Configuration
+
+project_identifier = "orbit-rails"
+attachments = [
+  {
+    identifier: project_identifier,
+    payload_type: "gemfile_lock",
+    payload_file: "Gemfile.lock"
+  },
+  {
+    identifier: project_identifier,
+    payload_type: "ruby_version",
+    payload_file: ".ruby-version"
+  },
+  {
+    identifier: project_identifier,
+    payload_type: "node_version",
+    payload_file: ".node-version"
+  },
+  {
+    identifier: project_identifier,
+    payload_type: "yarn_lock",
+    payload_file: "yarn.lock"
+  },
+  {
+    identifier: project_identifier,
+    payload_type: "simplecov_json",
+    payload_file: ENV.fetch("COVERAGE_FILE", "coverage/.resultset.json"),
+    upload_path: Dir.pwd
+  },
+  {
+    identifier: project_identifier,
+    payload_type: "git_log",
+    payload_file: "tmp/git_log.json"
+  }
+].select { |attachment| File.exist?(attachment[:payload_file]) }
+
+## Core implementation
+
+webhook_url = ENV.fetch("ORBIT_WEBHOOK_URL")
+
+commit_sha = ENV.fetch("COMMIT_SHA", ENV.fetch("GITHUB_SHA", `git rev-parse HEAD`.strip))
+commit_ref = ENV.fetch("COMMIT_REF", ENV.fetch("GITHUB_REF", `git rev-parse --abbrev-ref HEAD`.strip))
+
+if (gitlog_config = attachments.find { |attachment| attachment[:payload_type] == "git_log" })
+  `git log --pretty=format:'{"commit_sha": "%H", "author_name": "%an", "author_email": "%ae", "committed_at": "%ad", "message": "%f"},' --date=iso > #{gitlog_config[:payload_file]}`
+end
+
+puts "Uploading #{attachments.size} attachments..."
+
+require "uri"
+require "net/http"
+
+uri = URI.parse(webhook_url)
+http = Net::HTTP.new(uri.host, uri.port)
+http.use_ssl = true
+
+form_data = [
+  ["commit_sha", commit_sha],
+  ["commit_ref", commit_ref]
+]
+attachments.each do |attachment|
+  form_data << ["attachments[][identifier]", attachment[:identifier]]
+  form_data << ["attachments[][payload_type]", attachment[:payload_type]]
+  form_data << ["attachments[][payload_file]", File.open(attachment[:payload_file])]
+  form_data << ["attachments[][upload_path]", attachment[:upload_path]] if attachment[:upload_path]
+end
+form_data = form_data.reject { |key, value| value.nil? }
+
+request = Net::HTTP::Post.new(uri)
+request.set_form(form_data, "multipart/form-data")
+
+response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") do |http|
+  http.request(request)
+end
+
+if response.code != "200"
+  puts "Failed to upload attachments: #{response.body}"
+  exit 1
+end
+
+puts "Attachments uploaded successfully!"

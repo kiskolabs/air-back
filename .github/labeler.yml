@@ -1,0 +1,45 @@
+feature:
+  - head-branch: ["^feature", "feature"]
+patch:
+  - head-branch: ["^patch", "patch"]
+release:
+  - base-branch: "main"
+github config:
+  - changed-files:
+      - any-glob-to-any-file: ".github/**"
+config:
+  - changed-files:
+      - any-glob-to-any-file: ["config/**", "bin/**", "*"]
+graphql:
+  - changed-files:
+      - any-glob-to-any-file: "app/graphql/**"
+rails:
+  - changed-files:
+      - any-glob-to-any-file: ["app/**", "lib/**", "public/**"]
+schema migration:
+  - changed-files:
+      - any-glob-to-any-file: ["db/schema.rb", "db/migrate/**"]
+data migration:
+  - changed-files:
+      - any-glob-to-any-file: "db/data_migrations/**"
+ruby:
+  - changed-files:
+      - any-glob-to-any-file: "**/*.rb"
+spec:
+  - changed-files:
+      - any-glob-to-any-file: "spec/**"
+dart:
+  - changed-files:
+      - any-glob-to-any-file: "**/*.dart"
+javascript:
+  - changed-files:
+      - any-glob-to-any-file: "**/*.js"
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ["docs/**/*", "**/*.md"]
+infra:
+  - changed-files:
+      - any-glob-to-any-file: "infra/**"
+user scripts:
+  - changed-files:
+      - any-glob-to-any-file: "usr/**"

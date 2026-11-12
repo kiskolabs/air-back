@@ -1,0 +1,6 @@
+.pray
+*.praypkg
+.env
+.env.local
+.bundle
+vendor/bundle

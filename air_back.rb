@@ -1,19 +1,45 @@
+# frozen_string_literal: true
+
 require "openssl"
 require "sinatra/base"
-require "sinatra/reloader"
+require "json"
+require "time"
+require "digest"
+require "http"
+require "redis"
 
-require "honeybadger"
+begin
+  require "honeybadger"
+rescue LoadError
+  # optional in bare test boots
+end
+
+begin
+  require "sinatra/reloader"
+rescue LoadError
+  # optional outside development
+end
 
 class AirBack < Sinatra::Base
   MEASUREMENT_FIELDS = "CO2,Humidity,Noise,Temperature".freeze
+  TOKEN_KEY = "tokens"
 
   configure :development do
-    register Sinatra::Reloader
+    register Sinatra::Reloader if defined?(Sinatra::Reloader)
   end
 
-  configure :production, :development do
+  configure :production, :development, :test do
     enable :logging
     set :protection, except: [:json_csrf]
+    set :show_exceptions, false
+  end
+
+  error do
+    err = env["sinatra.error"]
+    Honeybadger.notify(err) if defined?(Honeybadger)
+    content_type "application/json"
+    status 500
+    { error: "Something went wrong" }.to_json
   end
 
   get "/" do
@@ -27,192 +53,163 @@ class AirBack < Sinatra::Base
 
     if (cached = redis.get(key))
       logger.info "Found cached air quality data"
-
       remaining = redis.ttl(key)
-      if remaining > 0
-        expires remaining, :public, :must_revalidate
-      end
-
-      cached
-    else
-      logger.info "Fetching new air quality data"
-      data = get_airquality_data
-
-      json = data.to_json
-      ttl = data["error"] ? 30 : 60
-      redis.setex("airquality", ttl, json)
-      expires ttl, :public, :must_revalidate
-      json
+      expires remaining, :public, :must_revalidate if remaining > 0
+      next cached
     end
+
+    logger.info "Fetching new air quality data"
+    data = get_airquality_data
+    json = data.to_json
+    ttl = data["error"] ? 30 : 60
+    redis.setex(key, ttl, json)
+    expires ttl, :public, :must_revalidate
+    status 503 if auth_error?(data)
+    json
   end
 
   get "/measurements" do
     content_type "application/json"
+    device_id = params[:device_id]
+    halt 400, { error: "No device_id specified" }.to_json unless device_id
 
-    if (device_id = params[:device_id])
-      hash = Digest::SHA1.hexdigest(device_id.to_s.downcase)
-      key = "measurements_#{hash}"
+    hash = Digest::SHA1.hexdigest(device_id.to_s.downcase)
+    key = "measurements_#{hash}"
+    response["Measurement-Fields"] = MEASUREMENT_FIELDS
 
-      response["Measurement-Fields"] = MEASUREMENT_FIELDS
+    if (cached = redis.get(key))
+      logger.info "Found cached measurements for #{device_id}"
+      remaining = redis.ttl(key)
+      expires remaining, :public, :must_revalidate if remaining > 0
+      next cached
+    end
 
-      if (cached = redis.get(key))
-        logger.info "Found cached measurements for #{device_id}"
+    logger.info "Fetching new measurements for #{device_id}"
+    data = get_measurements(device_id: device_id)
+    json = data.to_json
+    ttl = data["error"] ? 30 : 60
+    redis.setex(key, ttl, json)
+    expires ttl, :public, :must_revalidate
+    status 503 if auth_error?(data)
+    json
+  end
 
-        remaining = redis.ttl(key)
-        if remaining > 0
-          expires remaining, :public, :must_revalidate
+  helpers do
+    def auth_error?(data)
+      message = data.is_a?(Hash) ? data["error"].to_s : ""
+      message.match?(/refresh|token|grant|Missing Netatmo/i)
+    end
+
+    def get_airquality_data
+      response = HTTP.post("https://api.netatmo.com/api/gethomecoachsdata", form: {
+        access_token: get_tokens.fetch("access_token")
+      })
+      parse_netatmo_body(response, context_key: :get_airquality_data)
+    rescue NetatmoAuthError => error
+      { "error" => error.message }
+    end
+
+    def get_measurements(device_id:)
+      now = Time.now
+      response = HTTP.post("https://api.netatmo.com/api/getmeasure", form: {
+        access_token: get_tokens.fetch("access_token"),
+        date_begin: now.to_i - (60 * 60),
+        date_end: now.to_i,
+        device_id: device_id,
+        limit: 1024,
+        optimize: false,
+        real_time: false,
+        scale: "max",
+        type: MEASUREMENT_FIELDS
+      })
+      parse_netatmo_body(response, context_key: :get_measurements)
+    rescue NetatmoAuthError => error
+      { "error" => error.message }
+    end
+
+    def parse_netatmo_body(response, context_key:)
+      Honeybadger.context(context_key => response.headers.to_h)
+      parsed = response.parse
+      Honeybadger.context(context_key => parsed)
+
+      if parsed["body"]
+        body = parsed["body"]
+        return { "error" => "No data received" } if body.nil? || body.respond_to?(:empty?) && body.empty?
+
+        body.delete("user") if body.is_a?(Hash)
+        body
+      elsif (message = parsed.dig("error", "message") || parsed["error"])
+        { "error" => message }
+      else
+        logger.info "Error: #{parsed.inspect}"
+        { "error" => "Something went wrong" }
+      end
+    end
+
+    def get_tokens
+      cached = redis.mapped_hmget(TOKEN_KEY, "access_token", "refresh_token", "expires_at")
+      if cached && cached["access_token"] && cached["refresh_token"] && cached["expires_at"]
+        expires_at = Time.parse(cached.fetch("expires_at"))
+        return cached if expires_at >= Time.now
+
+        begin
+          return refresh_access_token(refresh_token: cached.fetch("refresh_token"))
+        rescue NetatmoAuthError => error
+          logger.info "Cached refresh failed: #{error.message}"
+          redis.del(TOKEN_KEY)
         end
-
-        cached
-      else
-        logger.info "Fetching new measurements for #{device_id}"
-        data = get_measurements(device_id: params[:device_id])
-        json = data.to_json
-        ttl = data["error"] ? 30 : 60
-        redis.setex("measurements_#{hash}", ttl, json)
-        expires ttl, :public, :must_revalidate
-        json
       end
-    else
-      { error: "No device_id specified" }.to_json
+
+      bootstrap_access_token
     end
-  end
 
-  def get_airquality_data
-    response = HTTP.post("https://api.netatmo.com/api/gethomecoachsdata", form: {
-      access_token: get_tokens["access_token"]
-    })
+    def bootstrap_access_token
+      refresh_token = ENV["NETATMO_REFRESH_TOKEN"].to_s.strip
+      raise NetatmoAuthError, "Missing Netatmo refresh token" if refresh_token.empty?
 
-    Honeybadger.context(get_airquality_headers: response.headers.to_h)
+      logger.info "Bootstrapping access token from NETATMO_REFRESH_TOKEN"
+      refresh_access_token(refresh_token: refresh_token)
+    end
 
-    parsed = response.parse
+    def refresh_access_token(refresh_token:)
+      logger.info "Refreshing access token"
+      response = HTTP.post("https://api.netatmo.com/oauth2/token", form: {
+        grant_type: "refresh_token",
+        refresh_token: refresh_token,
+        client_id: ENV.fetch("NETATMO_CLIENT_ID"),
+        client_secret: ENV.fetch("NETATMO_CLIENT_SECRET")
+      })
+      handle_token_response(response)
+    end
 
-    Honeybadger.context(get_airquality_data: parsed)
-
-    if parsed["body"]
-      body = parsed["body"]
-      if body.length > 0
-        body.delete("user")
-        body
+    def handle_token_response(response)
+      parsed = response.parse
+      if parsed["access_token"]
+        expires_at = Time.now + (parsed.fetch("expires_in").to_i * 0.9).to_i
+        tokens = {
+          "access_token" => parsed.fetch("access_token"),
+          "refresh_token" => parsed.fetch("refresh_token"),
+          "expires_at" => expires_at.iso8601
+        }
+        redis.mapped_hmset(TOKEN_KEY, tokens)
+        tokens
+      elsif parsed["error"]
+        raise NetatmoAuthError, "Refresh failure: #{parsed["error"]}"
       else
-        { "error" => "No data received" }
+        raise NetatmoAuthError, "Unknown token response"
       end
-    elsif (message = parsed.dig("error", "message"))
-      { "error" => message }
-    else
-      logger.info "Error: #{parsed.inspect}"
-      { "error" => "Something went wrong" }
     end
-  end
 
-  def get_measurements(device_id:)
-    now = Time.now
-
-    response = HTTP.post("https://api.netatmo.com/api/getmeasure", form: {
-      access_token: get_tokens["access_token"],
-      date_begin: now.to_i - (60 * 60), # 1 hour ago
-      date_end: now.to_i,
-      device_id: device_id,
-      limit: 1024,
-      optimize: false,
-      real_time: false,
-      scale: "max",
-      type: MEASUREMENT_FIELDS
-    })
-
-    Honeybadger.context(get_measurements_headers: response.headers.to_h)
-
-    parsed = response.parse
-
-    Honeybadger.context(get_measurements: parsed)
-
-    if parsed["body"]
-      body = parsed["body"]
-      if body.length > 0
-        body
-      else
-        { "error" => "No data received" }
+    def redis
+      Thread.current[:air_back_redis] ||= begin
+        if ENV["REDIS_URL"]
+          Redis.new(url: ENV["REDIS_URL"], ssl_params: { verify_mode: OpenSSL::SSL::VERIFY_NONE })
+        else
+          Redis.new
+        end
       end
-    elsif (message = parsed.dig("error", "message"))
-      return { "error" => message }
-    else
-      logger.info "Error: #{parsed.inspect}"
-      return { "error" => "Something went wrong" }
-    end
-  end
-
-  def get_tokens
-    cached = redis.mapped_hmget("tokens", "access_token", "refresh_token", "expires_at")
-
-    if cached && cached["access_token"]
-      expires_at = Time.parse(cached.fetch("expires_at"))
-
-      if expires_at < Time.now
-        refresh_access_token(refresh_token: cached.fetch("refresh_token"))
-      else
-        logger.info "Found valid cached tokens"
-        cached
-      end
-    else
-      create_access_token
-    end
-  end
-
-  def create_access_token
-    logger.info "Getting new access_token"
-
-    response = HTTP.post("https://api.netatmo.com/oauth2/token", form: {
-      grant_type: "password",
-      client_id: ENV.fetch("NETATMO_CLIENT_ID"),
-      client_secret: ENV.fetch("NETATMO_CLIENT_SECRET"),
-      username: ENV.fetch("NETATMO_USERNAME"),
-      password: ENV.fetch("NETATMO_PASSWORD"),
-      scope: "read_homecoach",
-    })
-
-    handle_token_response(response)
-  end
-
-  def refresh_access_token(refresh_token:)
-    logger.info "Refreshing access token"
-
-    response = HTTP.post("https://api.netatmo.com/oauth2/token", form: {
-      grant_type: "refresh_token",
-      refresh_token: refresh_token,
-      client_id: ENV.fetch("NETATMO_CLIENT_ID"),
-      client_secret: ENV.fetch("NETATMO_CLIENT_SECRET")
-    })
-
-    handle_token_response(response)
-  end
-
-  def handle_token_response(response)
-    parsed = response.parse
-
-    if parsed["access_token"]
-      # Set the expiry a little sooner than required for some leeway
-      expires_at = Time.now + (parsed.fetch("expires_in") * 0.9).to_i
-
-      tokens = {
-        "access_token" => parsed.fetch("access_token"),
-        "refresh_token" => parsed.fetch("refresh_token"),
-        "expires_at" => expires_at.iso8601
-      }
-      redis.mapped_hmset("tokens", tokens)
-
-      return tokens
-    elsif parsed["error"]
-      raise "Refresh failure: #{parsed["error"]}"
-    else
-      raise "Unknown error"
-    end
-  end
-
-  def redis
-    Thread.current[:air_back_redis] ||= if ENV["REDIS_URL"]
-      Redis.new(url: ENV["REDIS_URL"])
-    else
-      Redis.new
     end
   end
 end
+
+class NetatmoAuthError < StandardError; end
